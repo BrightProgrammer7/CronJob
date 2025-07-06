@@ -7,7 +7,6 @@ const axios = require('axios');
 const cron = require('node-cron');
 const morgan = require('morgan');
 // Import the custom date formatter
-// This requires 'moment-timezone' to be installed (npm install moment-timezone)
 const { formatDate } = require('./formatDate.js');
 
 
@@ -16,13 +15,17 @@ const app = express();
 const PORT = process.env.PORT || 3002;
 
 // --- Environment Variable Validation ---
-const { URL_TO_FETCH, CRON_SCHEDULE, FETCH_OWN } = process.env;
+// Now accepts a comma-separated string of URLs
+const { URLS_TO_FETCH, CRON_SCHEDULE, FETCH_OWN } = process.env;
 
-if (!URL_TO_FETCH || !CRON_SCHEDULE) {
-    console.error("Error: Missing required environment variables (URL_TO_FETCH, CRON_SCHEDULE).");
+if (!URLS_TO_FETCH || !CRON_SCHEDULE) {
+    console.error("Error: Missing required environment variables (URLS_TO_FETCH, CRON_SCHEDULE).");
     console.log("Please ensure your .env file contains these variables.");
     process.exit(1); // Exit the process if critical variables are missing
 }
+
+// Split the comma-separated string into an array of URLs
+const urls = URLS_TO_FETCH.split(',').map(url => url.trim());
 
 // --- Middleware ---
 app.use(express.json());
@@ -31,72 +34,73 @@ app.use(morgan('dev')); // Logging HTTP requests
 
 // --- Cron Job Logic ---
 /**
- * Asynchronously fetches the defined URL and logs the outcome.
+ * Asynchronously fetches all defined URLs and logs their outcomes.
  */
-async function fetchUrlJob() {
-    // Now uses the imported formatDate function
+async function fetchUrlsJob() {
     const timeNow = formatDate(new Date());
-    console.log(`[${timeNow}] --- Cron job starting ---`);
-    console.time('API Fetch Duration');
+    console.log(`[${timeNow}] --- Cron job starting for ${urls.length} URL(s) ---`);
+    console.time('Total Fetch Duration');
 
-    try {
-        console.log(`Fetching primary URL: ${URL_TO_FETCH}`);
-        const { status, statusText } = await axios.get(URL_TO_FETCH);
-        console.log('Primary URL fetch successful.');
-        console.log('API Status:', { Status: [status, statusText] });
+    // Create an array of fetch promises
+    const fetchPromises = urls.map(url => axios.get(url));
 
-        // Optionally, fetch its own URL if defined
-        if (FETCH_OWN) {
-            console.log(`Fetching own URL: ${FETCH_OWN}`);
-            await axios.get(FETCH_OWN);
-            console.log('Own URL fetch successful.');
-        }
+    // Use Promise.allSettled to wait for all fetches to complete, regardless of success or failure
+    const results = await Promise.allSettled(fetchPromises);
 
-    } catch (error) {
-        console.error(`Error fetching URL: ${URL_TO_FETCH}`);
-        if (error.response) {
-            // The request was made and the server responded with a status code
-            // that falls out of the range of 2xx
-            console.error('Error Status:', {
-                Status: [error.response.status, error.response.statusText]
-            });
-        } else if (error.request) {
-            // The request was made but no response was received
-            console.error('Error Request: No response received from the server.');
+    results.forEach((result, index) => {
+        const url = urls[index];
+        if (result.status === 'fulfilled') {
+            const { status, statusText } = result.value;
+            console.log(`✅ SUCCESS fetching ${url} | Status: [${status}, ${statusText}]`);
         } else {
-            // Something happened in setting up the request that triggered an Error
-            console.error('Error Message:', error.message);
+            // Handle axios errors
+            const error = result.reason;
+            if (error.response) {
+                console.error(`❌ FAILED fetching ${url} | Status: [${error.response.status}, ${error.response.statusText}]`);
+            } else if (error.request) {
+                console.error(`❌ FAILED fetching ${url} | Error: No response received from server.`);
+            } else {
+                console.error(`❌ FAILED fetching ${url} | Error: ${error.message}`);
+            }
         }
-    } finally {
-        console.timeEnd('API Fetch Duration');
-        console.log(`--- Cron job finished ---`);
+    });
+
+    // Optionally, fetch its own URL if defined
+    if (FETCH_OWN) {
+        try {
+            console.log(`Pinging own URL: ${FETCH_OWN}`);
+            await axios.get(FETCH_OWN);
+            console.log('✅ SUCCESS pinging own URL.');
+        } catch(error) {
+            console.error(`❌ FAILED pinging own URL: ${FETCH_OWN}`);
+        }
     }
+
+    console.timeEnd('Total Fetch Duration');
+    console.log(`--- Cron job finished ---`);
 }
 
 // --- Cron Job Scheduling ---
-// Validate the cron schedule format to prevent runtime errors
 if (cron.validate(CRON_SCHEDULE)) {
     console.log(`Scheduling cron job with schedule: "${CRON_SCHEDULE}"`);
-    cron.schedule(CRON_SCHEDULE, fetchUrlJob, {
+    cron.schedule(CRON_SCHEDULE, fetchUrlsJob, {
         scheduled: true,
-        timezone: "Etc/UTC" // Cron timezone is UTC, but logging will be formatted to Indian time
+        timezone: "Etc/UTC"
     });
 } else {
     console.error(`Error: Invalid CRON_SCHEDULE format: "${CRON_SCHEDULE}".`);
-    console.error("Please provide a valid cron string (e.g., '*/5 * * * *').");
     process.exit(1);
 }
 
 
 // --- API Routes ---
 app.get('/', (req, res) => {
-    res.status(200).send(`<h2>✅ Cron job server is running correctly.</h2><p>The job is scheduled and will run automatically. No need to visit any other endpoint.</p>`);
+    res.status(200).send(`<h2>✅ Cron job server is running correctly.</h2><p>Scheduled to fetch ${urls.length} URL(s).</p>`);
 });
 
-// A simple endpoint to manually trigger the job if needed for testing
 app.get('/run-manually', async (req, res) => {
     console.log("Manual trigger of fetch job requested.");
-    await fetchUrlJob();
+    await fetchUrlsJob();
     res.send('Manual fetch job executed. Check server logs for details.');
 });
 
@@ -104,5 +108,5 @@ app.get('/run-manually', async (req, res) => {
 // --- Server Start ---
 app.listen(PORT, () => {
     console.log(`\n🚀 Server listening on port ${PORT}`);
-    console.log(`Visit http://localhost:${PORT} to check server status.`);
+    console.log(`Monitoring the following URLs:\n- ${urls.join('\n- ')}`);
 });
